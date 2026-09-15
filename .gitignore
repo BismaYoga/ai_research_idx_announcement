@@ -1,0 +1,25 @@
+# Environment & Secrets (SANGAT PENTING: Jangan push ke GitHub)
+.env
+*.env
+.env.*
+!.env.example
+
+# Riwayat ID yang sudah dikirim
+seen_ids.json
+
+# Python Cache & Artifacts
+__pycache__/
+*.py[cod]
+*$py.class
+*.log
+
+# Virtual Environments
+venv/
+.venv/
+env/
+
+# IDE & OS files
+.vscode/
+.idea/
+Thumbs.db
+Desktop.ini
