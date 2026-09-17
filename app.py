@@ -14,6 +14,7 @@ import tempfile
 import threading
 from datetime import datetime
 from collections import deque
+import gc
 
 import requests
 from google import genai
@@ -68,6 +69,7 @@ MAX_SEEN = int(os.getenv("MAX_SEEN", "5000"))
 
 PORT = int(os.getenv("PORT", "7860"))
 HOST = os.getenv("HOST", "0.0.0.0").strip()
+HEADLESS = os.getenv("HEADLESS", "true").strip().lower() in ["true", "1", "yes"]
 
 if not TELEGRAM_TOKEN or not TELEGRAM_CHAT_ID or not API_AI:
     print("\n⚠️  [PERINGATAN] Variabel rahasia belum lengkap di file .env!")
@@ -481,19 +483,45 @@ def scan_sekali(page) -> list:
 # BACKGROUND WORKER LOOP (DIRECT CONNECTION)
 # ---------------------------------------------------------------------------
 
+def setup_page_optimizations(page):
+    """Blokir download resource berat (gambar, media, font) agar hemat RAM dan bandwidth."""
+    def block_unnecessary(route):
+        if route.request.resource_type in ["image", "media", "font"]:
+            try:
+                route.abort()
+            except Exception:
+                pass
+        else:
+            try:
+                route.continue_()
+            except Exception:
+                pass
+
+    try:
+        page.route("**/*", block_unnecessary)
+    except Exception:
+        pass
+
 def run_worker():
-    log_event("Memulai bot worker (Mode Direct / Tanpa Proxy)...")
+    log_event(f"Memulai bot worker (Mode Direct, Headless={HEADLESS}, RAM Optimized)...")
     seen = load_seen()
     first_run = False
 
     launch_kwargs = {
-        "headless": False,
+        "headless": HEADLESS,
         "args": [
-            "--window-position=-3200,-3200",
-            "--window-size=1280,800",
             "--no-sandbox",
             "--disable-setuid-sandbox",
-            "--disable-dev-shm-usage"
+            "--disable-dev-shm-usage",
+            "--disable-gpu",
+            "--no-zygote",
+            "--renderer-process-limit=1",
+            "--blink-settings=imagesEnabled=false",
+            "--js-flags=--max-old-space-size=128",
+            "--disable-background-networking",
+            "--disable-extensions",
+            "--disable-default-apps",
+            "--window-size=1280,800"
         ]
     }
 
@@ -510,6 +538,7 @@ def run_worker():
 
         page = context.new_page()
         Stealth().apply_stealth_sync(page)
+        setup_page_optimizations(page)
 
         while True:
             stamp = datetime.now().strftime("%H:%M:%S")
@@ -520,12 +549,18 @@ def run_worker():
                 log_event("Tab browser sempat tertutup, membuat tab baru...")
                 page = context.new_page()
                 Stealth().apply_stealth_sync(page)
+                setup_page_optimizations(page)
 
             try:
                 items = scan_sekali(page)
             except Exception as e:
                 log_event(f"⚠️ Gagal scan IDX ({e}). Akan dicoba lagi...")
                 bot_status["state"] = f"Standby (Scan Terakhir Gagal: {stamp})"
+                try:
+                    page.goto("about:blank")
+                except Exception:
+                    pass
+                gc.collect()
                 time.sleep(POLL_INTERVAL * 60)
                 continue
 
@@ -560,6 +595,14 @@ def run_worker():
 
             save_seen(seen)
             bot_status["state"] = f"Standby (Cek berikutnya dalam {POLL_INTERVAL} mnt)"
+
+            # OPTIMASI RAM: Lepas DOM halaman saat standby & panggil Garbage Collector
+            try:
+                page.goto("about:blank")
+            except Exception:
+                pass
+            gc.collect()
+
             time.sleep(POLL_INTERVAL * 60)
 
 # ---------------------------------------------------------------------------
