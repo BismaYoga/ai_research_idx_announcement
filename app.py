@@ -216,20 +216,21 @@ ai_client = genai.Client(api_key=API_AI)
 
 AI_PROMPT = """Kamu adalah analis pasar modal Indonesia yang ahli.
 
-Analisis dokumen keterbukaan informasi IDX berikut dan berikan insight singkat.
+Analisis dokumen keterbukaan informasi IDX berikut dan berikan ringkasan serta sentimen secara singkat dan terstruktur.
 
-Format jawaban (WAJIB ikuti, maksimal 3-4 kalimat):
+Format jawaban (WAJIB IKUTI DENGAN PERSIS):
 
-📊 <b>Insight AI:</b>
-[Ringkasan inti dokumen — apa yang terjadi]
-[Dampak/implikasi bagi investor]
-[Sentimen: Positif 🟢 / Netral 🟡 / Negatif 🔴]
+💡 <b>Ringkasan:</b>
+[Uraian singkat inti dokumen dan dampaknya bagi investor dalam 2-3 kalimat]
+
+<b>Sentimen:</b> Positif 🟢 / Netral 🟡 / Negatif 🔴
 
 Aturan:
-- Gunakan bahasa Indonesia yang ringkas dan mudah dipahami
-- Fokus pada hal MATERIAL bagi investor
-- Jangan ulangi judul dokumen
-- JANGAN gunakan markdown (**, ##, dll), gunakan HTML tags (<b>, <i>) saja
+- Gunakan bahasa Indonesia yang ringkas, bernas, dan mudah dipahami
+- Fokus pada dampak MATERIAL bagi investor/pemegang saham
+- Jangan mengulang judul dokumen
+- Selalu pisahkan baris Sentimen dengan satu baris kosong (enter) di bawah ringkasan
+- JANGAN gunakan format markdown (** atau ##), gunakan tag HTML (<b>, <i>) saja
 - Maksimal 300 karakter"""
 
 def download_pdf(page, url: str) -> bytes:
@@ -341,20 +342,49 @@ def analisis_dokumen(page, link: str, lampiran: list, judul: str) -> str:
 # TELEGRAM
 # ---------------------------------------------------------------------------
 
+def format_insight(insight: str) -> str:
+    """Format teks insight: ganti header ke '💡 Ringkasan:' dan pastikan 'Sentimen:' selalu di-enter di baris baru."""
+    if not insight:
+        return ""
+    text = insight.strip()
+
+    # Ganti header lama jika masih dihasilkan model
+    text = re.sub(r"(?:📊\s*)?<b>\s*Insight AI\s*:?\s*</b>", "💡 <b>Ringkasan:</b>", text, flags=re.IGNORECASE)
+    text = re.sub(r"^(?:📊\s*)?Insight AI\s*:?", "💡 <b>Ringkasan:</b>", text, flags=re.IGNORECASE)
+
+    # Pastikan label Sentimen selalu dipisah baris baru (enter ganda)
+    text = re.sub(r"([^\n])\s*(<b>\s*Sentimen\s*:?\s*</b>)", r"\1\n\n\2", text, flags=re.IGNORECASE)
+    text = re.sub(r"([^\n])\s*(Sentimen\s*:)", r"\1\n\n<b>Sentimen:</b>", text, flags=re.IGNORECASE)
+
+    # Bersihkan newline berlebih
+    text = re.sub(r"\n{3,}", "\n\n", text).strip()
+    return text
+
 def kirim_telegram(judul: str, link: str, emiten: str, siaran_pers: bool, lampiran: list, insight: str = "") -> bool:
     safe_judul = html.escape(judul)
     safe_emiten = html.escape(emiten)
     label = "📰 <b>Siaran Pers</b>\n" if siaran_pers else ""
     tag = f"<b>[{safe_emiten}]</b> " if safe_emiten else ""
-    teks = f"{label}{tag}{safe_judul}\n\n🔗 <a href=\"{link}\">Dokumen Utama</a>"
 
+    bagian = [f"{label}{tag}{safe_judul}"]
+
+    # Ringkasan insight AI (dengan sentimen terpisah enter)
+    cleaned_insight = format_insight(insight)
+    if cleaned_insight:
+        bagian.append(cleaned_insight)
+
+    # Dokumen Utama & Lampiran diposisikan di bawah ringkasan
+    links = []
+    if link:
+        links.append(f'🔗 <a href="{link}">Dokumen Utama</a>')
     for i, lamp in enumerate(lampiran, start=1):
-        teks += f'\n\n📎 <a href="{lamp}">Lampiran {i}</a>'
+        links.append(f'📎 <a href="{lamp}">Lampiran {i}</a>')
 
-    if insight:
-        teks += f"\n\n{insight}"
+    if links:
+        bagian.append("\n".join(links))
 
-    teks += "\n\n<i>Menyaring Noise, Memberi Insight — PintarSaham</i>"
+    bagian.append("<i>Menyaring Noise, Memberi Insight — PintarSaham</i>")
+    teks = "\n\n".join(bagian)
 
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     try:
