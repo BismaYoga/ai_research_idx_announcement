@@ -20,6 +20,8 @@ from google import genai
 from playwright.sync_api import sync_playwright
 from playwright_stealth import Stealth
 
+from contextlib import asynccontextmanager
+
 # Web Dashboard (FastAPI / Uvicorn)
 from fastapi import FastAPI
 from fastapi.responses import HTMLResponse
@@ -320,7 +322,11 @@ def analisis_dokumen(page, link: str, lampiran: list, judul: str) -> str:
         log_event(f"Insight AI berhasil dibuat ({len(insight)} karakter)")
         return insight
     except Exception as e:
-        log_event(f"Gemini AI error: {e}")
+        err_str = str(e)
+        if "401" in err_str or "UNAUTHENTICATED" in err_str or "ACCOUNT_STATE_INVALID" in err_str:
+            log_event("⚠️ Gemini AI Error: API Key tidak valid atau Service Account dinonaktifkan di Google Cloud Console.")
+        else:
+            log_event(f"Gemini AI error: {e}")
         return ""
     finally:
         if tmp_path and os.path.exists(tmp_path):
@@ -369,20 +375,53 @@ def kirim_telegram(judul: str, link: str, emiten: str, siaran_pers: bool, lampir
 # SCAN SATU PUTARAN (DIRECT KE IDX)
 # ---------------------------------------------------------------------------
 
+def wait_for_cards(page, max_retries: int = 2):
+    """Menunggu elemen attach-card dengan deteksi Cloudflare dan auto-reload jika macet."""
+    for attempt in range(max_retries):
+        # Deteksi Cloudflare baik dari title maupun isi DOM
+        for cf_attempt in range(25):
+            t = (page.title() or "").lower()
+            try:
+                content = (page.content() or "").lower()[:2500]
+            except Exception:
+                content = ""
+
+            is_cf = (
+                any(w in t for w in ["just a moment", "tunggu", "attention required", "security check", "cloudflare"])
+                or "cf-turnstile" in content
+                or "challenge-platform" in content
+            )
+
+            if is_cf:
+                log_event(f"Menunggu verifikasi Cloudflare ({cf_attempt + 1}/25)...")
+                time.sleep(2)
+            else:
+                break
+
+        try:
+            page.wait_for_selector("div.attach-card", timeout=35000)
+            return True
+        except Exception as e:
+            if attempt < max_retries - 1:
+                log_event(f"Elemen pengumuman belum muncul (percobaan {attempt + 1}/{max_retries}), me-refresh halaman...")
+                try:
+                    page.reload(wait_until="domcontentloaded", timeout=45000)
+                except Exception:
+                    page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+                time.sleep(3)
+            else:
+                raise e
+    return False
+
 def scan_sekali(page) -> list:
     items = []
-    page.goto(URL, wait_until="domcontentloaded", timeout=60000)
+    try:
+        page.goto(URL, wait_until="domcontentloaded", timeout=45000)
+    except Exception as e:
+        log_event(f"Koneksi awal ke IDX lambat ({e}), mencoba muat ulang...")
+        page.goto(URL, wait_until="domcontentloaded", timeout=45000)
 
-    # Deteksi dan tunggu jika Cloudflare menampilkan verifikasi
-    for attempt in range(25):
-        t = page.title().lower()
-        if "just a moment" in t or "tunggu" in t or "attention required" in t:
-            log_event(f"Menunggu verifikasi Cloudflare ({attempt + 1}/25)...")
-            time.sleep(2)
-        else:
-            break
-
-    page.wait_for_selector("div.attach-card", timeout=60000)
+    wait_for_cards(page, max_retries=2)
 
     for halaman in range(1, PAGES_TO_SCAN + 1):
         kartu = page.query_selector_all("div.attach-card")
@@ -477,6 +516,11 @@ def run_worker():
             bot_status["state"] = "Sedang Memeriksa IDX..."
             bot_status["last_scan"] = stamp
 
+            if page.is_closed():
+                log_event("Tab browser sempat tertutup, membuat tab baru...")
+                page = context.new_page()
+                Stealth().apply_stealth_sync(page)
+
             try:
                 items = scan_sekali(page)
             except Exception as e:
@@ -522,7 +566,13 @@ def run_worker():
 # FASTAPI WEB DASHBOARD (http://localhost:7860)
 # ---------------------------------------------------------------------------
 
-app = FastAPI(title="IDX Telegram Bot Dashboard")
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    t = threading.Thread(target=run_worker, daemon=True)
+    t.start()
+    yield
+
+app = FastAPI(title="IDX Telegram Bot Dashboard", lifespan=lifespan)
 
 @app.get("/health")
 def health():
@@ -604,11 +654,6 @@ def index():
     </div>
 </body>
 </html>"""
-
-@app.on_event("startup")
-def startup_event():
-    t = threading.Thread(target=run_worker, daemon=True)
-    t.start()
 
 if __name__ == "__main__":
     uvicorn.run(app, host=HOST, port=PORT)

@@ -23,3 +23,6 @@ env/
 .idea/
 Thumbs.db
 Desktop.ini
+
+# Sub-repositories
+ai_lk_keuangan/
