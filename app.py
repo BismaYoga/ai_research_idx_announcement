@@ -706,85 +706,88 @@ def run_worker():
         ]
     }
 
-    with sync_playwright() as p:
-        browser = p.chromium.launch(**launch_kwargs)
-        context = browser.new_context(
-            user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
-            locale="id-ID",
-            timezone_id="Asia/Jakarta",
-            viewport={"width": 1280, "height": 800}
-        )
-        context.set_default_navigation_timeout(35000)
-        context.set_default_timeout(30000)
+    while True:
+        try:
+            with sync_playwright() as p:
+                browser = p.chromium.launch(**launch_kwargs)
+                context = browser.new_context(
+                    user_agent="Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/122.0.0.0 Safari/537.36",
+                    locale="id-ID",
+                    timezone_id="Asia/Jakarta",
+                    viewport={"width": 1280, "height": 800}
+                )
+                context.set_default_navigation_timeout(35000)
+                context.set_default_timeout(30000)
 
-        page = context.new_page()
-        Stealth().apply_stealth_sync(page)
-        setup_page_optimizations(page)
-
-        while True:
-            stamp = datetime.now().strftime("%H:%M:%S")
-            bot_status["state"] = "Sedang Memeriksa IDX..."
-            bot_status["last_scan"] = stamp
-
-            if page.is_closed():
-                log_event("Tab browser sempat tertutup, membuat tab baru...")
                 page = context.new_page()
                 Stealth().apply_stealth_sync(page)
                 setup_page_optimizations(page)
 
-            try:
-                items = scan_sekali(page)
-            except Exception as e:
-                log_event(f"⚠️ Gagal scan IDX ({e}). Akan dicoba lagi...")
-                bot_status["state"] = f"Standby (Scan Terakhir Gagal: {stamp})"
-                try:
-                    page.goto("about:blank")
-                except Exception:
-                    pass
-                gc.collect()
-                time.sleep(POLL_INTERVAL * 60)
-                continue
+                while True:
+                    if not browser.is_connected() or page.is_closed():
+                        log_event("Sesi browser terputus, memulai ulang browser...")
+                        break
 
-            baru = [it for it in items if it["id"] not in seen]
-            log_event(f"{len(items)} lolos filter, {len(baru)} pengumuman baru.")
+                    stamp = datetime.now().strftime("%H:%M:%S")
+                    bot_status["state"] = "Sedang Memeriksa IDX..."
+                    bot_status["last_scan"] = stamp
 
-            for it in baru:
-                if first_run:
-                    seen.add(it["id"])
-                    continue
+                    try:
+                        items = scan_sekali(page)
+                    except Exception as e:
+                        log_event(f"⚠️ Gagal scan IDX ({e}). Akan dicoba lagi...")
+                        bot_status["state"] = f"Standby (Scan Terakhir Gagal: {stamp})"
+                        try:
+                            page.goto("about:blank")
+                        except Exception:
+                            pass
+                        gc.collect()
+                        time.sleep(POLL_INTERVAL * 60)
+                        continue
 
-                bot_status["state"] = f"Menganalisis [{it['emiten']}]..."
-                insight = analisis_dokumen(page, it["link"], it["lampiran"], it["judul"])
-                berhasil = kirim_telegram(it["judul"], it["link"], it["emiten"], it["siaran_pers"], it["lampiran"], insight)
+                    baru = [it for it in items if it["id"] not in seen]
+                    log_event(f"{len(items)} lolos filter, {len(baru)} pengumuman baru.")
 
-                if berhasil:
-                    seen.add(it["id"])
-                    bot_status["total_sent"] += 1
-                    bot_status["last_items"].append({
-                        "emiten": it["emiten"],
-                        "judul": it["judul"],
-                        "time": stamp
-                    })
-                    if len(bot_status["last_items"]) > 10:
-                        bot_status["last_items"].pop(0)
-                    log_event(f"-> Terkirim: [{it['emiten'] or '-'}] {it['judul'][:50]}")
-                    time.sleep(4)
+                    for it in baru:
+                        if first_run:
+                            seen.add(it["id"])
+                            continue
 
-            if first_run:
-                log_event(f"{len(baru)} ID lama dipelajari. Siklus berikutnya akan mengirim notifikasi.")
-                first_run = False
+                        bot_status["state"] = f"Menganalisis [{it['emiten']}]..."
+                        insight = analisis_dokumen(page, it["link"], it["lampiran"], it["judul"])
+                        berhasil = kirim_telegram(it["judul"], it["link"], it["emiten"], it["siaran_pers"], it["lampiran"], insight)
 
-            save_seen(seen)
-            bot_status["state"] = f"Standby (Cek berikutnya dalam {POLL_INTERVAL} mnt)"
+                        if berhasil:
+                            seen.add(it["id"])
+                            bot_status["total_sent"] += 1
+                            bot_status["last_items"].append({
+                                "emiten": it["emiten"],
+                                "judul": it["judul"],
+                                "time": stamp
+                            })
+                            if len(bot_status["last_items"]) > 10:
+                                bot_status["last_items"].pop(0)
+                            log_event(f"-> Terkirim: [{it['emiten'] or '-'}] {it['judul'][:50]}")
+                            time.sleep(4)
 
-            # OPTIMASI RAM: Lepas DOM halaman saat standby & panggil Garbage Collector
-            try:
-                page.goto("about:blank")
-            except Exception:
-                pass
-            gc.collect()
+                    if first_run:
+                        log_event(f"{len(baru)} ID lama dipelajari. Siklus berikutnya akan mengirim notifikasi.")
+                        first_run = False
 
-            time.sleep(POLL_INTERVAL * 60)
+                    save_seen(seen)
+                    bot_status["state"] = f"Standby (Cek berikutnya dalam {POLL_INTERVAL} mnt)"
+
+                    # OPTIMASI RAM: Lepas DOM halaman saat standby & panggil Garbage Collector
+                    try:
+                        page.goto("about:blank")
+                    except Exception:
+                        pass
+                    gc.collect()
+
+                    time.sleep(POLL_INTERVAL * 60)
+        except Exception as e_proc:
+            log_event(f"Notice browser ({e_proc}), memulihkan otomatis dalam 10 detik...")
+            time.sleep(10)
 
 # ---------------------------------------------------------------------------
 # FASTAPI WEB DASHBOARD (http://localhost:7860)
