@@ -265,6 +265,30 @@ def download_pdf(page, url: str) -> bytes:
         return None
     if url.startswith("http://"):
         url = "https://" + url[7:]
+    
+    # Cara 1: Gunakan Playwright Request Context (mewarisi cookie browser & aman dari CORS 403)
+    try:
+        resp = page.context.request.get(
+            url,
+            headers={
+                "Referer": page.url or URL,
+                "Accept": "application/pdf,*/*",
+            },
+            timeout=25000
+        )
+        if resp.ok:
+            data = resp.body()
+            if len(data) > 100 and b"%PDF" in data[:10]:
+                return data
+            elif len(data) > 100:
+                log_event(f"Dokumen bukan PDF (Header: {data[:10]!r}) dari {url}")
+                return None
+        elif resp.status != 403:
+            log_event(f"Gagal unduh file (HTTP {resp.status}): {url}")
+    except Exception as e:
+        log_event(f"Download context.request error: {e}")
+
+    # Cara 2 (Fallback): Evaluate di dalam halaman
     try:
         result = page.evaluate(
             """async (url) => {
