@@ -515,18 +515,21 @@ def kirim_telegram(judul: str, link: str, emiten: str, siaran_pers: bool, lampir
 def wait_for_cards(page, max_retries: int = 2):
     """Menunggu elemen attach-card dengan deteksi Cloudflare dan auto-reload jika macet."""
     for attempt in range(max_retries):
+        t_cur = page.title() or ""
+        u_cur = page.url or ""
+        log_event(f"Status Halaman (percobaan {attempt + 1}/{max_retries}): '{t_cur}' ({u_cur})")
+
         # Deteksi Cloudflare baik dari title maupun isi DOM
         for cf_attempt in range(25):
             t = (page.title() or "").lower()
             try:
-                content = (page.content() or "").lower()[:2500]
+                content = (page.content() or "").lower()[:3000]
             except Exception:
                 content = ""
 
             is_cf = (
-                any(w in t for w in ["just a moment", "tunggu", "attention required", "security check", "cloudflare"])
-                or "cf-turnstile" in content
-                or "challenge-platform" in content
+                any(w in t for w in ["just a moment", "tunggu", "attention required", "security check", "cloudflare", "access denied", "forbidden"])
+                or any(w in content for w in ["cf-turnstile", "challenge-platform", "cf-wrapper", "ray id", "checking your browser"])
             )
 
             if is_cf:
@@ -549,6 +552,13 @@ def wait_for_cards(page, max_retries: int = 2):
             page.wait_for_selector("div.attach-card", timeout=35000)
             return True
         except Exception as e:
+            try:
+                body_preview = page.evaluate("() => document.body ? document.body.innerText.slice(0, 300) : ''")
+                body_clean = " ".join((body_preview or "").split())
+                log_event(f"Cuplikan layar saat timeout: {body_clean[:200]!r}")
+            except Exception:
+                pass
+
             if attempt < max_retries - 1:
                 log_event(f"Elemen pengumuman belum muncul (percobaan {attempt + 1}/{max_retries}), me-refresh halaman...")
                 try:
