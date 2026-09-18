@@ -531,6 +531,16 @@ def wait_for_cards(page, max_retries: int = 2):
 
             if is_cf:
                 log_event(f"Menunggu verifikasi Cloudflare ({cf_attempt + 1}/25)...")
+                try:
+                    for frame in page.frames:
+                        if any(k in frame.url.lower() for k in ["cloudflare", "turnstile", "challenge"]):
+                            cb = frame.query_selector("input[type='checkbox'], span.ctp-checkbox-label, div.ctp-checkbox")
+                            if cb:
+                                cb.click()
+                                time.sleep(1)
+                                break
+                except Exception:
+                    pass
                 time.sleep(2)
             else:
                 break
@@ -620,9 +630,18 @@ def scan_sekali(page) -> list:
 # ---------------------------------------------------------------------------
 
 def setup_page_optimizations(page):
-    """Blokir download resource berat (gambar, media, font) agar hemat RAM dan bandwidth."""
+    """Blokir download resource berat agar hemat RAM, tapi izinkan resource Cloudflare."""
     def block_unnecessary(route):
-        if route.request.resource_type in ["image", "media", "font"]:
+        url = route.request.url.lower()
+        # Selalu izinkan resource dari domain Cloudflare / Turnstile
+        if any(cf in url for cf in ["cloudflare", "turnstile", "challenges", "challenge-platform"]):
+            try:
+                route.continue_()
+            except Exception:
+                pass
+            return
+
+        if route.request.resource_type in ["media", "font"]:
             try:
                 route.abort()
             except Exception:
@@ -651,8 +670,8 @@ def run_worker():
             "--disable-dev-shm-usage",
             "--disable-gpu",
             "--no-zygote",
+            "--disable-blink-features=AutomationControlled",
             "--renderer-process-limit=1",
-            "--blink-settings=imagesEnabled=false",
             "--js-flags=--max-old-space-size=128",
             "--disable-background-networking",
             "--disable-extensions",
