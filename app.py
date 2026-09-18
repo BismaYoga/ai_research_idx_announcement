@@ -151,11 +151,11 @@ def normalize(text: str) -> str:
     text = text.replace("\n", " ").replace("\t", " ").replace("\r", " ")
     return re.sub(r"\s+", " ", text).strip().lower()
 
-BLACKLIST_EMITEN = ["ZP", "BK"]
+BLACKLIST_EMITEN = ["IDX", "ZP", "BK"]
 
 def is_blacklisted(judul: str, emiten: str = "") -> bool:
     e = (emiten or "").strip().upper()
-    # 1. Filter langsung jika emiten ZP atau BK
+    # 1. Filter langsung jika pengumuman dari bursa [IDX] atau broker [ZP], [BK]
     if e in BLACKLIST_EMITEN:
         return True
 
