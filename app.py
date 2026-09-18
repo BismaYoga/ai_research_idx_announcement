@@ -556,8 +556,17 @@ def wait_for_cards(page, max_retries: int = 2):
                 break
 
         try:
-            page.wait_for_selector("div.attach-card", timeout=35000)
-            return True
+            try:
+                page.wait_for_selector("div.attach-card", timeout=25000)
+                return True
+            except Exception:
+                # Picu scroll ke bawah untuk memicu lazy-load / Vue render
+                try:
+                    page.evaluate("() => window.scrollTo(0, 500)")
+                except Exception:
+                    pass
+                page.wait_for_selector("div.attach-card", timeout=35000)
+                return True
         except Exception as e:
             try:
                 body_preview = page.evaluate("() => document.body ? document.body.innerText.slice(0, 300) : ''")
@@ -647,32 +656,8 @@ def scan_sekali(page) -> list:
 # ---------------------------------------------------------------------------
 
 def setup_page_optimizations(page):
-    """Blokir download resource berat agar hemat RAM, tapi izinkan resource Cloudflare."""
-    def block_unnecessary(route):
-        url = route.request.url.lower()
-        # Selalu izinkan resource dari domain Cloudflare / Turnstile
-        if any(cf in url for cf in ["cloudflare", "turnstile", "challenges", "challenge-platform"]):
-            try:
-                route.continue_()
-            except Exception:
-                pass
-            return
-
-        if route.request.resource_type in ["media", "font"]:
-            try:
-                route.abort()
-            except Exception:
-                pass
-        else:
-            try:
-                route.continue_()
-            except Exception:
-                pass
-
-    try:
-        page.route("**/*", block_unnecessary)
-    except Exception:
-        pass
+    """Optimasi halaman tanpa mencegat route agar tidak membebani koneksi API IDX."""
+    pass
 
 def run_worker():
     log_event(f"Memulai bot worker (Mode Direct, Headless={HEADLESS}, RAM Optimized)...")
