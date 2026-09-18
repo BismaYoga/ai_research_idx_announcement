@@ -332,7 +332,7 @@ def analisis_dokumen(page, link: str, lampiran: list, judul: str) -> str:
         
         response = None
         candidate_models = [GEMINI_MODEL]
-        for fb in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+        for fb in ["gemini-3.6-pro", "gemini-3-flash"]:
             if fb not in candidate_models:
                 candidate_models.append(fb)
 
@@ -351,11 +351,18 @@ def analisis_dokumen(page, link: str, lampiran: list, judul: str) -> str:
                 except Exception as e_req:
                     last_error = e_req
                     err_text = str(e_req)
-                    if any(c in err_text for c in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                    if any(c in err_text for c in ["429", "RESOURCE_EXHAUSTED"]):
                         if attempt < 2:
-                            status_label = "503/High Demand" if "503" in err_text or "UNAVAILABLE" in err_text else "Rate Limit"
-                            log_event(f"Model {model_name} sedang padat ({status_label}), mencoba ulang dalam 3 detik ({attempt+1}/3)...")
-                            time.sleep(3)
+                            m_delay = re.search(r"retry\s*(?:in|delay:?)\s*['\"]?(\d+)", err_text, re.IGNORECASE)
+                            wait_sec = (int(m_delay.group(1)) + 1) if m_delay else 20
+                            wait_sec = min(max(wait_sec, 15), 60)
+                            log_event(f"Gemini terkena kuota/rate limit (429), jeda {wait_sec} detik lalu coba lagi ({attempt+1}/3)...")
+                            time.sleep(wait_sec)
+                            continue
+                    elif any(c in err_text for c in ["503", "UNAVAILABLE"]):
+                        if attempt < 2:
+                            log_event(f"Model {model_name} padat (503), mencoba ulang dalam 5 detik ({attempt+1}/3)...")
+                            time.sleep(5)
                             continue
                     log_event(f"Model {model_name} notice: {e_req}")
                     break
@@ -752,7 +759,7 @@ def run_worker():
                     if len(bot_status["last_items"]) > 10:
                         bot_status["last_items"].pop(0)
                     log_event(f"-> Terkirim: [{it['emiten'] or '-'}] {it['judul'][:50]}")
-                    time.sleep(1)
+                    time.sleep(4)
 
             if first_run:
                 log_event(f"{len(baru)} ID lama dipelajari. Siklus berikutnya akan mengirim notifikasi.")
