@@ -60,7 +60,8 @@ URL = os.getenv("IDX_URL", "https://www.idx.co.id/id/perusahaan-tercatat/keterbu
 API_AI = os.getenv("API_AI", "").strip()
 TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN", "").strip()
 TELEGRAM_CHAT_ID = os.getenv("TELEGRAM_CHAT_ID", "").strip()
-GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash").strip()
+TELEGRAM_THREAD_ID = os.getenv("TELEGRAM_THREAD_ID", os.getenv("TELEGRAM_TOPIC_ID", "")).strip()
+GEMINI_MODEL = os.getenv("GEMINI_MODEL", "gemini-3.6-flash").strip()
 
 POLL_INTERVAL = int(os.getenv("POLL_INTERVAL", "5"))
 PAGES_TO_SCAN = int(os.getenv("PAGES_TO_SCAN", "2"))
@@ -150,9 +151,35 @@ def normalize(text: str) -> str:
     text = text.replace("\n", " ").replace("\t", " ").replace("\r", " ")
     return re.sub(r"\s+", " ", text).strip().lower()
 
-def is_blacklisted(judul: str) -> bool:
+BLACKLIST_EMITEN = ["ZP", "BK"]
+
+def is_blacklisted(judul: str, emiten: str = "") -> bool:
+    e = (emiten or "").strip().upper()
+    # 1. Filter langsung jika emiten ZP atau BK
+    if e in BLACKLIST_EMITEN:
+        return True
+
     j = normalize(judul)
-    return any(j.startswith(prefix) for prefix in BLACKLIST_PREFIXES)
+
+    # 2. Cek prefix blacklist umum
+    if any(j.startswith(prefix) for prefix in BLACKLIST_PREFIXES):
+        return True
+
+    # 3. Filter pengumuman bursa [IDX] terkait ZP (Maybank) & BK (JP Morgan) Waran Terstruktur
+    is_zp = bool(re.search(r"\bzp\b|maybank", j))
+    is_bk = bool(re.search(r"\bbk\b|j\.?p\.?\s*morgan", j))
+    is_waran_securities = any(w in j for w in ["waran", "warrant", "structured", "terstruktur", "sekuritas"])
+
+    if (e == "IDX" or not e) and (is_zp or is_bk) and is_waran_securities:
+        return True
+
+    if "maybank sekuritas" in j or re.search(r"j\.?p\.?\s*morgan\s+sekuritas", j):
+        return True
+
+    if e == "IDX" and ("waran terstruktur" in j or "structured warrant" in j):
+        return True
+
+    return False
 
 def is_siaran_pers(judul: str) -> bool:
     j = normalize(judul)
@@ -303,24 +330,41 @@ def analisis_dokumen(page, link: str, lampiran: list, judul: str) -> str:
         log_event(f"Mengirim PDF ({len(pdf_bytes)//1024} KB) ke Gemini AI...")
         uploaded = ai_client.files.upload(file=tmp_path)
         
-        try:
-            response = ai_client.models.generate_content(
-                model=GEMINI_MODEL,
-                contents=[
-                    uploaded,
-                    f"Judul dokumen: {judul}\n\n{AI_PROMPT}"
-                ]
-            )
-        except Exception as e_model:
-            log_event(f"Model {GEMINI_MODEL} notice ({e_model}), mencoba fallback ke gemini-1.5-flash...")
-            response = ai_client.models.generate_content(
-                model="gemini-1.5-flash",
-                contents=[
-                    uploaded,
-                    f"Judul dokumen: {judul}\n\n{AI_PROMPT}"
-                ]
-            )
-            
+        response = None
+        candidate_models = [GEMINI_MODEL]
+        for fb in ["gemini-2.5-flash", "gemini-2.0-flash"]:
+            if fb not in candidate_models:
+                candidate_models.append(fb)
+
+        last_error = None
+        for model_name in candidate_models:
+            for attempt in range(3):
+                try:
+                    response = ai_client.models.generate_content(
+                        model=model_name,
+                        contents=[
+                            uploaded,
+                            f"Judul dokumen: {judul}\n\n{AI_PROMPT}"
+                        ]
+                    )
+                    break
+                except Exception as e_req:
+                    last_error = e_req
+                    err_text = str(e_req)
+                    if any(c in err_text for c in ["503", "UNAVAILABLE", "429", "RESOURCE_EXHAUSTED"]):
+                        if attempt < 2:
+                            status_label = "503/High Demand" if "503" in err_text or "UNAVAILABLE" in err_text else "Rate Limit"
+                            log_event(f"Model {model_name} sedang padat ({status_label}), mencoba ulang dalam 3 detik ({attempt+1}/3)...")
+                            time.sleep(3)
+                            continue
+                    log_event(f"Model {model_name} notice: {e_req}")
+                    break
+            if response:
+                break
+
+        if not response:
+            raise last_error or Exception("Semua model Gemini gagal merespons.")
+
         insight = response.text.strip()
         log_event(f"Insight AI berhasil dibuat ({len(insight)} karakter)")
         return insight
@@ -386,22 +430,83 @@ def kirim_telegram(judul: str, link: str, emiten: str, siaran_pers: bool, lampir
     bagian.append("<i>Menyaring Noise, Memberi Insight — PintarSaham</i>")
     teks = "\n\n".join(bagian)
 
-    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
-    try:
-        r = requests.post(
-            url,
-            data={
-                "chat_id": TELEGRAM_CHAT_ID,
-                "text": teks,
-                "parse_mode": "HTML",
-                "disable_web_page_preview": False,
-            },
-            timeout=20
-        )
-        return r.status_code == 200 and r.json().get("ok")
-    except Exception as e:
-        log_event(f"Telegram error: {e}")
+    chat_targets = [c.strip() for c in TELEGRAM_CHAT_ID.split(",") if c.strip()]
+    if not chat_targets:
+        log_event("Telegram error: TELEGRAM_CHAT_ID kosong.")
         return False
+
+    url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
+    any_success = False
+
+    for target in chat_targets:
+        # Dukung format chat_id:thread_id atau chat_id/thread_id
+        if ":" in target:
+            cid, tid = target.split(":", 1)
+        elif "/" in target:
+            cid, tid = target.split("/", 1)
+        else:
+            cid = target
+            tid = TELEGRAM_THREAD_ID
+
+        cid = cid.strip()
+        tid = str(tid).strip() if tid else ""
+
+        payload = {
+            "chat_id": cid,
+            "text": teks,
+            "parse_mode": "HTML",
+            "disable_web_page_preview": False,
+        }
+        if tid:
+            try:
+                payload["message_thread_id"] = int(tid)
+            except ValueError:
+                log_event(f"Notice: thread_id '{tid}' bukan angka valid, diabaikan.")
+
+        try:
+            r = requests.post(
+                url,
+                data=payload,
+                timeout=20
+            )
+            if r.status_code == 200 and r.json().get("ok"):
+                any_success = True
+            else:
+                err_text = r.text
+                # Jika topik berstatus ditutup (CLOSED), bot buka sebentar, kirim, lalu kunci lagi
+                if "TOPIC_CLOSED" in err_text and tid:
+                    log_event(f"Topik {tid} tertutup. Membuka topik sementara untuk mengirim...")
+                    reopen_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/reopenForumTopic"
+                    close_url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/closeForumTopic"
+                    
+                    try:
+                        reopen_res = requests.post(reopen_url, data={"chat_id": cid, "message_thread_id": int(tid)}, timeout=10)
+                        if reopen_res.status_code == 200 and reopen_res.json().get("ok"):
+                            # Kirim pesan saat topik terbuka
+                            r_retry = requests.post(url, data=payload, timeout=20)
+                            if r_retry.status_code == 200 and r_retry.json().get("ok"):
+                                any_success = True
+                                log_event(f"-> Pesan sukses terkirim ke topik {tid}!")
+                            else:
+                                log_event(f"Gagal kirim setelah topik dibuka: {r_retry.text}")
+                            
+                            # Kunci kembali topiknya
+                            time.sleep(1)
+                            close_res = requests.post(close_url, data={"chat_id": cid, "message_thread_id": int(tid)}, timeout=10)
+                            if close_res.status_code == 200 and close_res.json().get("ok"):
+                                log_event(f"Topik {tid} berhasil dikunci/ditutup kembali.")
+                            else:
+                                log_event(f"Gagal mengunci kembali topik {tid}: {close_res.text}")
+                        else:
+                            log_event(f"Gagal auto-reopen topik {tid}. Pastikan bot diberi izin admin 'Manage Topics' (Kelola Topik). Detail: {reopen_res.text}")
+                    except Exception as e_topic:
+                        log_event(f"Error proses auto-reopen/close: {e_topic}")
+                else:
+                    log_event(f"Telegram kirim ke {cid} (thread {tid or 'main'}) gagal: {err_text}")
+        except Exception as e:
+            log_event(f"Telegram error ke {cid} (thread {tid or 'main'}): {e}")
+
+    return any_success
 
 # ---------------------------------------------------------------------------
 # SCAN SATU PUTARAN (DIRECT KE IDX)
@@ -468,8 +573,9 @@ def scan_sekali(page) -> list:
             if link and link.startswith("/"):
                 link = f"https://www.idx.co.id{link}"
             judul = judul_bersih(judul_raw)
+            emiten = extract_emiten(judul_raw)
 
-            if is_blacklisted(judul):
+            if is_blacklisted(judul, emiten):
                 continue
 
             pid = extract_id(c, link)
@@ -482,7 +588,7 @@ def scan_sekali(page) -> list:
                 "judul": judul,
                 "link": link,
                 "lampiran": lampiran,
-                "emiten": extract_emiten(judul_raw),
+                "emiten": emiten,
                 "siaran_pers": is_siaran_pers(judul),
                 "waktu": normalize(time_el.inner_text()) if time_el else "",
             })
